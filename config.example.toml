@@ -1,0 +1,36 @@
+# Copy to config.toml. Secrets go in .env / environment variables, never here.
+[sources]
+feeds = [
+  "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+  "https://www.federalreserve.gov/feeds/press_all.xml",
+  "https://www.sec.gov/news/pressreleases.rss",
+]
+search_queries = ["stock market outlook", "federal reserve interest rates", "retirement planning"]
+max_article_age_days = 5
+
+[editorial]
+audience = "retail and high-net-worth investors"
+voice = "clear, professional, no hype"
+topics = "markets, macro, personal finance, investing"
+batch_size = 5                   # headlines offered each week
+run_days = ["mon"]
+run_times = ["08:00"]
+disclaimer = "Investing involves risk, including loss of principal. Past performance does not guarantee future results. Not investment advice."
+
+[posting]
+timezone = "America/New_York"
+post_times = ["09:30", "12:30", "17:00"]
+vista_profile_ids = []           # Vista Social profile IDs to publish to
+
+[providers]
+whatsapp_provider = "console"    # console | twilio
+llm_provider = "anthropic"       # anthropic | fake
+image_provider = "openai"        # openai | fake | none
+vista_mode = "dry_run"           # dry_run | vista_webhook | vista_api
+
+[runtime]
+approver = "+15551234567"        # the only WhatsApp number allowed to approve
+public_base_url = ""             # https://your-host (needed for Twilio webhooks and sending images)
+port = 8080
+admin_token = ""
+data_dir = "data"
