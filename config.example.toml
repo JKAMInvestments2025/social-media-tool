@@ -12,7 +12,8 @@ max_article_age_days = 5
 audience = "retail and high-net-worth investors"
 voice = "clear, professional, no hype"
 topics = "markets, macro, personal finance, investing"
-posts_per_run = 1
+batch_size = 5                   # headlines offered each week
+run_days = ["mon"]
 run_times = ["08:00"]
 disclaimer = "Investing involves risk, including loss of principal. Past performance does not guarantee future results. Not investment advice."
 

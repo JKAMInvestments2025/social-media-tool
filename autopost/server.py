@@ -75,7 +75,8 @@ def scheduler(cfg, pipe):
     while True:
         now = datetime.now(tz)
         key = now.strftime("%Y-%m-%d %H:%M")
-        if now.strftime("%H:%M") in cfg.run_times and key != last:
+        day = now.strftime("%a").lower()[:3]
+        if day in [d.lower()[:3] for d in cfg.run_days] and now.strftime("%H:%M") in cfg.run_times and key != last:
             last = key
             _locked(pipe.discover)
         time.sleep(20)
@@ -84,5 +85,5 @@ def scheduler(cfg, pipe):
 def serve(cfg, pipe):
     threading.Thread(target=scheduler, args=(cfg, pipe), daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", cfg.port), make_handler(cfg, pipe))
-    print(f"[server] listening on :{cfg.port}; runs at {cfg.run_times} {cfg.timezone}")
+    print(f"[server] listening on :{cfg.port}; runs {cfg.run_days} at {cfg.run_times} {cfg.timezone}")
     srv.serve_forever()

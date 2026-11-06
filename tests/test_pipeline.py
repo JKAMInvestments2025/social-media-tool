@@ -28,32 +28,47 @@ def build(tmp):
 
 
 class Flow(unittest.TestCase):
-    def test_happy_path(self):
+    def test_batch_flow(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg, p, v, wa = build(tmp)
             self.assertEqual(p.discover(), 1)                      # old article filtered out
-            self.assertIn("Pick a title", wa.sent[-1][0])
-            p.handle_reply("2")                                    # title
-            self.assertEqual(p.db.active()["state"], "content_pending")
-            p.handle_reply("make it shorter")                      # edit loop
-            self.assertEqual(p.db.active()["revisions"], 2)
-            p.handle_reply("yes")                                  # content ok -> image
-            self.assertEqual(p.db.active()["state"], "image_pending")
-            self.assertEqual(v.posts, [])                          # nothing scheduled before final approval
-            p.handle_reply("YES")                                  # image ok -> schedule
+            self.assertIn("story ideas", wa.sent[-1][0])
+            p.handle_reply("banana")                               # invalid menu reply is re-asked
+            self.assertEqual(p.db.active()["state"], "proposed")
+            p.handle_reply("1")
+            it = p.db.active()
+            self.assertEqual(it["state"], "review_pending")        # title + text + image in ONE message
+            self.assertTrue(it["image_path"] and it["body"])
+            p.handle_reply("make it shorter")                      # text edit keeps the image
+            self.assertEqual(p.db.active()["image_path"], it["image_path"])
+            p.handle_reply("title: Custom headline")
+            self.assertEqual(p.db.active()["title"], "Custom headline")
+            p.handle_reply("image: add a bull")
+            self.assertNotEqual(p.db.active()["image_path"], it["image_path"])
+            self.assertEqual(v.posts, [])                          # nothing scheduled before YES
+            p.handle_reply("YES")
             self.assertEqual(len(v.posts), 1)
             post = v.posts[0]
-            self.assertIn("Not investment advice", post["text"])   # disclaimer enforced
-            self.assertEqual(post["profile_ids"], ["p1"])
+            self.assertIn("Not investment advice", post["text"])
+            self.assertEqual(post["title"], "Custom headline")
             self.assertEqual(p.db.items()[0]["state"], "scheduled")
 
-    def test_custom_title_skip_and_dedup(self):
+    def test_none_skip_dedup_and_open_batch(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg, p, v, wa = build(tmp)
             p.discover()
-            p.handle_reply("skip")
+            self.assertEqual(p.discover(), 0)                      # open batch blocks a new one
+            p.handle_reply("none")
             self.assertEqual(p.db.items()[0]["state"], "rejected")
             self.assertEqual(p.discover(), 0)                      # same URL never reused
+            self.assertEqual(v.posts, [])
+
+    def test_flagged_text_cannot_be_scheduled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, p, v, wa = build(tmp)
+            p.discover(); p.handle_reply("all")
+            p.db.update(p.db.active()["id"], body="Guaranteed returns!")
+            p.handle_reply("yes")
             self.assertEqual(v.posts, [])
 
     def test_slots_not_double_booked(self):

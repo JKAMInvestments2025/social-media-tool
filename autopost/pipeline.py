@@ -1,10 +1,14 @@
-"""The approval state machine.
+"""Weekly batch approval flow (two WhatsApp touchpoints per post, one YES to approve).
 
-queued -> title_pending -> content_pending -> image_pending -> scheduled
-Any stage can end in rejected / failed. One item is in front of the approver at a time.
-Replies: a number picks a title, YES approves, SKIP drops the item, REDO regenerates,
-and any other text is treated as an edit instruction (or, at the title stage, a custom title).
+ 1. MENU    one message lists N proposed headlines  -> reply "1 3 5", "all", or "none"
+ 2. REVIEW  for each pick, ONE message with title + text + image -> reply YES to schedule
+
+States: proposed -> selected -> review_pending -> scheduled   (or rejected / failed)
+
+Review replies: YES | SKIP | REDO (new text + image) | "image: <change>" (image only)
+                | "title: <new title>" | any other text = edit instruction for the text.
 """
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -24,70 +28,125 @@ class Pipeline:
         self.fetch = fetch
         self.public_url = public_url or (lambda path: f"{cfg.public_base_url.rstrip('/')}/media/{path.split('/')[-1]}")
 
-    # ---------- discovery ----------
+    # ---------- weekly batch ----------
     def discover(self):
-        cands = [c for c in sources.gather(self.cfg, self.fetch) if not self.db.seen(c["url"])]
+        if self.db.active() or self.db.next_selected():
+            self.wa.send("Last batch is still open, so I haven't started a new one. Reply to finish it (or SKIP items).")
+            return 0
+        cands = [c for c in sources.gather(self.cfg, self.fetch) if not self.db.seen(c["url"])][: self.cfg.max_candidates]
         if not cands:
             print("[discover] no new candidates")
             return 0
-        cands = cands[: self.cfg.max_candidates]
-        n = 0
-        for i in llmmod.rank(self.llm, self.cfg, cands, self.cfg.posts_per_run):
+        ids = []
+        for i in llmmod.rank(self.llm, self.cfg, cands, self.cfg.batch_size):
             c = cands[i]
             self.db.mark_seen(c["url"])
-            text = sources.article_text(c["url"], self.fetch)
-            self.db.add_item(url=c["url"], source_title=c["title"], summary=c["summary"], article_text=text)
-            n += 1
-        self.advance()
-        return n
+            item = {"url": c["url"], "source_title": c["title"], "summary": c["summary"],
+                    "article_text": sources.article_text(c["url"], self.fetch)}
+            try:
+                titles = llmmod.titles(self.llm, self.cfg, item)
+            except Exception as e:
+                print(f"[discover] titles failed for {c['url']}: {e}")
+                continue
+            ids.append(self.db.add_item(**item, titles=titles, title=titles[0], state="proposed"))
+        if not ids:
+            return 0
+        lines = []
+        for n, i in enumerate(ids, 1):
+            it = self.db.item(i)
+            lines.append(f"{n}. {it['title']}\n   ↳ {it['source_title'][:80]}")
+        self._say(None, f"📰 This week's {len(ids)} story ideas:\n\n" + "\n".join(lines)
+                  + '\n\nWhich should I write up? Reply e.g. "1 3 5", "all", or "none".')
+        return len(ids)
 
-    # ---------- flow ----------
+    # ---------- reply routing ----------
+    def handle_reply(self, text):
+        item = self.db.active()
+        if not item:
+            self.wa.send("Nothing is waiting for approval right now.")
+            return
+        self.db.log(item["id"], "in", text)
+        if item["state"] == "proposed":
+            return self._menu_reply(text)
+        return self._review_reply(item, text)
+
+    def _menu_reply(self, text):
+        low = text.strip().lower()
+        proposed = self.db.proposed()
+        if low in ("all", "everything"):
+            picks = set(range(1, len(proposed) + 1))
+        elif low in NO or low == "none":
+            picks = set()
+        else:
+            picks = {int(n) for n in re.findall(r"\d+", low) if 1 <= int(n) <= len(proposed)}
+            if not picks:
+                return self.wa.send(f'Reply with story numbers like "1 3", "all", or "none" (1-{len(proposed)}).')
+        for n, it in enumerate(proposed, 1):
+            self.db.update(it["id"], state="selected" if n in picks else "rejected")
+        self.wa.send(f"👍 Writing up {len(picks)} post(s); I'll send them one at a time." if picks else "OK, nothing selected this week.")
+        self.advance()
+
+    def _review_reply(self, item, text):
+        t, low = text.strip(), text.strip().lower()
+        if low in YES:
+            return self._finish(item)
+        if low in NO:
+            self.db.update(item["id"], state="rejected")
+            self._say(item, f"🗑 #{item['id']} skipped.")
+            return self.advance()
+        if low in REDO:
+            return self._draft(item, redo=True)
+        m = re.match(r"(image|title)\s*:\s*(.+)", t, re.I | re.S)
+        if m and m.group(1).lower() == "title":
+            self.db.update(item["id"], title=m.group(2).strip()[:150])
+            return self._review_message(self.db.item(item["id"]))
+        if m:
+            return self._draft(item, image_feedback=m.group(2).strip(), keep_body=True)
+        return self._draft(item, body_feedback=t)
+
+    # ---------- drafting ----------
     def advance(self):
-        """Start the next queued item if nobody is waiting on the approver."""
+        """Draft the next selected post once the approver is free."""
         if self.db.active():
             return
-        item = self.db.next_queued()
+        item = self.db.next_selected()
         if item:
-            self._propose_titles(item)
+            self._draft(item)
 
-    def _propose_titles(self, item, feedback=""):
+    def _draft(self, item, redo=False, body_feedback="", image_feedback="", keep_body=False):
         try:
-            titles = llmmod.titles(self.llm, self.cfg, item, feedback)
+            if not keep_body:
+                body = llmmod.body(self.llm, self.cfg, item, body_feedback)
+                self.db.update(item["id"], body=body)
+                item = self.db.item(item["id"])
+            if not (body_feedback and item["image_path"]) or redo or image_feedback:
+                prompt = llmmod.image_prompt(self.llm, self.cfg, item, image_feedback)
+                rev = (item["revisions"] or 0) + 1
+                path = images.generate(self.cfg, prompt, item["id"], rev)
+                self.db.update(item["id"], image_prompt=prompt, image_path=path)
+            self.db.update(item["id"], state="review_pending", revisions=(item["revisions"] or 0) + 1)
         except Exception as e:
             return self._fail(item, e)
-        self.db.update(item["id"], titles=titles, state="title_pending")
-        opts = "\n".join(f"{i}. {t}" for i, t in enumerate(titles, 1))
-        self._say(item, f"📰 New post #{item['id']}\nSource: {item['source_title']}\n{item['url']}\n\n"
-                        f"Pick a title:\n{opts}\n\nReply 1-{len(titles)}, send your own title, REDO for new options, or SKIP.")
+        self._review_message(self.db.item(item["id"]))
 
-    def _draft_body(self, item, feedback=""):
-        try:
-            body = llmmod.body(self.llm, self.cfg, item, feedback)
-        except Exception as e:
-            return self._fail(item, e)
-        self.db.update(item["id"], body=body, state="content_pending", revisions=(item["revisions"] or 0) + 1)
-        item = self.db.item(item["id"])
-        warn = compliance.flags(body)
-        self._say(item, f"✍️ Draft for #{item['id']}\n\n{item['title']}\n\n{body}\n"
-                        + (f"\n⚠️ Compliance flags: {', '.join(warn)}\n" if warn else "")
-                        + "\nYES to approve text, or reply with edit instructions. REDO / SKIP also work.")
-
-    def _make_image(self, item, feedback=""):
-        try:
-            prompt = llmmod.image_prompt(self.llm, self.cfg, item, feedback)
-            path = images.generate(self.cfg, prompt, item["id"], (item["revisions"] or 0))
-        except Exception as e:
-            return self._fail(item, e)
-        self.db.update(item["id"], image_prompt=prompt, image_path=path, state="image_pending", revisions=(item["revisions"] or 0) + 1)
-        item = self.db.item(item["id"])
+    def _review_message(self, item):
+        warn = compliance.flags(item["body"])
+        path = item["image_path"]
         media = self.public_url(path) if path and self.cfg.public_base_url else None
-        self._say(item, f"🖼 Image for #{item['id']}\n(prompt: {prompt[:200]})\n\nYES to schedule, or describe changes. REDO / SKIP also work."
-                  + ("" if media or not path else f"\n[image saved locally: {path}; set public_base_url to send it here]"), media)
+        self._say(item, f"✍️ Post #{item['id']} — review\n\n*{item['title']}*\n\n{item['body']}\n"
+                  + (f"\n⚠️ Compliance flags: {', '.join(warn)}\n" if warn else "")
+                  + (f"\n[image saved locally: {path}; set public_base_url to send it here]\n" if path and not media else "")
+                  + '\nYES = schedule · SKIP · REDO · "image: <change>" · "title: <new>" · or type edit instructions.', media)
+        self.db.update(item["id"], state="review_pending")
 
+    # ---------- scheduling ----------
     def _finish(self, item):
-        body = compliance.with_disclaimer(item["body"], self.cfg.disclaimer)
+        flagged = compliance.flags(item["body"])
+        if flagged:
+            return self._say(item, f"⚠️ Can't schedule: flagged wording ({', '.join(flagged)}). Edit the text first.")
         slot = self.next_slot()
-        post = {"title": item["title"], "text": body, "link": item["url"], "image_path": item["image_path"],
+        post = {"title": item["title"], "text": compliance.with_disclaimer(item["body"], self.cfg.disclaimer),
+                "link": item["url"], "image_path": item["image_path"],
                 "image_url": self.public_url(item["image_path"]) if item["image_path"] and self.cfg.public_base_url else None,
                 "profile_ids": self.cfg.vista_profile_ids, "schedule_time": slot.strftime("%Y-%m-%d %H:%M")}
         try:
@@ -109,42 +168,9 @@ class Pipeline:
                     return cand
         raise RuntimeError("no free posting slot")
 
-    # ---------- replies ----------
-    def handle_reply(self, text):
-        item = self.db.active()
-        if not item:
-            self.wa.send("Nothing is waiting for approval right now.")
-            return
-        self.db.log(item["id"], "in", text)
-        t, low = text.strip(), text.strip().lower()
-        if low in NO:
-            self.db.update(item["id"], state="rejected")
-            self._say(item, f"🗑 #{item['id']} skipped.")
-            return self.advance()
-        st = item["state"]
-        if st == "title_pending":
-            if low in REDO:
-                return self._propose_titles(item, "The previous options were rejected; offer different angles.")
-            if low.isdigit() and 1 <= int(low) <= len(item["titles"]):
-                title = item["titles"][int(low) - 1]
-            elif len(t) <= 150:
-                title = t
-            else:
-                return self._say(item, "That's too long for a title (150 chars max). Pick a number or send a shorter one.")
-            self.db.update(item["id"], title=title)
-            return self._draft_body(self.db.item(item["id"]))
-        if st == "content_pending":
-            if low in YES:
-                return self._make_image(item)
-            return self._draft_body(item, "" if low in REDO else t)
-        if st == "image_pending":
-            if low in YES:
-                return self._finish(item)
-            return self._make_image(item, "" if low in REDO else t)
-
-    # ---------- helpers ----------
     def _say(self, item, text, media=None):
-        self.db.log(item["id"], "out", text)
+        if item:
+            self.db.log(item["id"], "out", text)
         self.wa.send(text, media)
 
     def _fail(self, item, err):

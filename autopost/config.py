@@ -15,7 +15,8 @@ class Config:
     audience: str = "retail and high-net-worth investors"
     voice: str = "clear, professional, no hype"
     topics: str = "markets, macro, personal finance, investing"
-    posts_per_run: int = 1
+    batch_size: int = 5                  # headlines offered per weekly batch
+    run_days: list = field(default_factory=lambda: ["mon"])
     run_times: list = field(default_factory=lambda: ["08:00"])
     # posting
     timezone: str = "America/New_York"

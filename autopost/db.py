@@ -2,7 +2,7 @@ import json
 import sqlite3
 import time
 
-ACTIVE = ("title_pending", "content_pending", "image_pending")
+ACTIVE = ("proposed", "review_pending")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items(
@@ -46,8 +46,11 @@ class DB:
         r = self.c.execute(f"SELECT * FROM items WHERE state IN ({q}) ORDER BY id LIMIT 1", ACTIVE).fetchone()
         return self._row(r)
 
-    def next_queued(self):
-        return self._row(self.c.execute("SELECT * FROM items WHERE state='queued' ORDER BY id LIMIT 1").fetchone())
+    def next_selected(self):
+        return self._row(self.c.execute("SELECT * FROM items WHERE state='selected' ORDER BY id LIMIT 1").fetchone())
+
+    def proposed(self):
+        return [self._row(r) for r in self.c.execute("SELECT * FROM items WHERE state='proposed' ORDER BY id")]
 
     def items(self, state=None):
         q, a = ("SELECT * FROM items WHERE state=? ORDER BY id DESC", (state,)) if state else ("SELECT * FROM items ORDER BY id DESC", ())

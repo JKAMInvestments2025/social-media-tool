@@ -3,9 +3,10 @@
 Finds interesting news, drafts a social post, and walks it through **WhatsApp approvals** (title → text → image) before scheduling it in **Vista Social**. Pure Python 3.11+ standard library — nothing to install.
 
 ```
-RSS + Google News → Claude ranks → Claude proposes 3 titles ─▶ WhatsApp: pick/edit
-   → Claude writes post ─▶ WhatsApp: YES / edit / REDO → image prompt + OpenAI image
-   ─▶ WhatsApp: YES → compliance check + disclaimer → Vista Social (next free slot)
+Monday: RSS + Google News → Claude ranks → 5 headlines ─▶ WhatsApp #1: reply "1 3 5"
+Then, per pick: Claude writes post + image prompt → OpenAI image
+   ─▶ WhatsApp #2 (one message: title + text + image): YES
+   → compliance check + disclaimer → Vista Social (next free slot)
 ```
 
 ## Quick start (no API keys)
@@ -13,20 +14,18 @@ RSS + Google News → Claude ranks → Claude proposes 3 titles ─▶ WhatsApp:
 cp config.example.toml config.toml
 # in config.toml set: llm_provider="fake", image_provider="fake"
 python -m autopost run                 # starts the flow; "WhatsApp" messages print to the console
-python -m autopost reply 2             # pick title 2
-python -m autopost reply "shorter"     # edit instructions
-python -m autopost reply yes           # approve text -> image
-python -m autopost reply yes           # approve image -> scheduled (dry run)
+python -m autopost reply all           # pick stories from the menu
+python -m autopost reply "shorter"     # edit the text (image is kept)
+python -m autopost reply yes           # approve -> scheduled (dry run)
 python -m autopost status
 python -m unittest discover -s tests
 ```
 
 ## Replies
-| Stage | Accepted replies |
+| Message | Accepted replies |
 |---|---|
-| Title | `1`/`2`/`3`, your own title, `REDO`, `SKIP` |
-| Text | `YES`, any edit instruction, `REDO`, `SKIP` |
-| Image | `YES`, a description of changes, `REDO`, `SKIP` |
+| Weekly menu | `1 3 5`, `all`, `none` |
+| Post review | `YES` (schedule), `SKIP`, `REDO` (new text + image), `image: <change>`, `title: <new title>`, or any other text = edit instruction for the text |
 
 ## Going live
 1. **Keys** → `.env` (see `.env.example`): Anthropic, OpenAI (images), Twilio (WhatsApp).
@@ -35,7 +34,7 @@ python -m unittest discover -s tests
    - `vista_webhook` — recommended: a Make/Zapier scenario receives our JSON (`title,text,link,image_url,profile_ids,schedule_time`) and runs Vista's *Schedule Post* action. No API add-on needed.
    - `vista_api` — Vista's paid API. **The JSON field names and base URL in `autopost/vista.py` are unverified**; check them against your Vista API docs first.
    - `dry_run` — logs only (default).
-4. Run `python -m autopost serve` (daily run at `run_times`; `POST /admin/run` with the admin token triggers it manually). Host anywhere that has a public HTTPS URL.
+4. Run `python -m autopost serve` (runs on `run_days` at `run_times`; `POST /admin/run` with the admin token triggers it manually). Host anywhere that has a public HTTPS URL.
 
 ## Safeguards
-Only one post waits on you at a time; articles are never reused; nothing is scheduled without your final YES; risky phrases ("guaranteed", "risk-free"…) are flagged in the draft; the disclaimer is always appended; every message is logged in SQLite (`data/autopost.db`) as an audit trail.
+One post is reviewed at a time; an unfinished batch blocks the next; articles are never reused; nothing is scheduled without your final YES; risky phrases ("guaranteed", "risk-free"…) are flagged in the draft; the disclaimer is always appended; every message is logged in SQLite (`data/autopost.db`) as an audit trail.
